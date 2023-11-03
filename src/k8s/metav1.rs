@@ -11,8 +11,8 @@ pub struct ObjectMeta {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OwnerReference {
     #[serde(rename = "apiVersion")]
-    api_version: String,
-    kind: String,
-    name: String,
-    uid: String,
+    pub api_version: String,
+    pub kind: String,
+    pub name: String,
+    pub uid: String,
 }

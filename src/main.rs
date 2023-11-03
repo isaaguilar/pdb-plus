@@ -1,6 +1,20 @@
 mod k8s;
+use std::collections::HashMap;
+
 use k8s::corev1::pod;
 use k8s::policyv1::poddisruptionbudget;
+use serde::{Deserialize, Serialize};
+
+use crate::k8s::metav1;
+#[derive(Serialize, Deserialize, Debug)]
+struct ReplicaKind {
+    metadata: metav1::ObjectMeta,
+    spec: ReplicaSpec,
+}
+#[derive(Serialize, Deserialize, Debug)]
+struct ReplicaSpec {
+    replicas: u32,
+}
 
 fn main() {
     let client = k8s::Base::new().expect("Failed to get client");
@@ -27,6 +41,7 @@ fn main() {
                 item.metadata.namespace, item.metadata.name
             );
 
+            // let label_selector = get_label_selector();
             let query: Option<String> = match item.spec.selector.match_labels {
                 Some(data) => Some(format!(
                     "labelSelector={}",
@@ -42,16 +57,127 @@ fn main() {
                 .get(
                     String::from("v1"),
                     String::from("pods"),
-                    Some(item.metadata.namespace),
+                    Some(String::from(&item.metadata.namespace)),
                     None,
                     query,
                 )
                 .expect("Failure getting resource");
 
-            let pod_list: pod::List;
+            let mut pod_list: pod::List;
             pod_list = serde_json::from_str(&body).expect("Could not decode json");
 
-            println!("{:?}", pod_list);
+            let mut is_ready: bool = false;
+            for pod in &pod_list.items {
+                if pod.status.conditions.iter().any(|condition| {
+                    condition.condition_type == "Ready" && condition.status == "True"
+                }) {
+                    is_ready = true;
+                    break;
+                }
+            }
+
+            let pod_item = if pod_list.items.len() > 0 {
+                pod_list.items.pop().expect("No pod was in pod_list items")
+            } else {
+                println!("No pods detected");
+                continue;
+            };
+
+            let mut owner_references = match pod_item.metadata.owner_references {
+                Some(o) => o,
+                None => {
+                    println!("owner_reference data missing");
+                    continue;
+                }
+            };
+
+            let owner_reference = if owner_references.len() > 0 {
+                owner_references
+                    .pop()
+                    .expect("Expected owner_reference failed")
+            } else {
+                println!("no owner_references found");
+                continue;
+            };
+
+            let api_version = owner_reference.api_version;
+            let kind = format!("{}s", owner_reference.kind.to_lowercase());
+            let resource = owner_reference.name;
+
+            println!("Pods are owned by : {}.{}.{}", api_version, kind, resource);
+
+            let body = client
+                .get(
+                    api_version,
+                    kind,
+                    Some(String::from(&item.metadata.namespace)),
+                    Some(resource),
+                    None,
+                )
+                .expect("Failure getting resource");
+
+            let replica_kind: ReplicaKind;
+            replica_kind = serde_json::from_str(&body).expect("Failed to parse replica kind");
+
+            let replicas = replica_kind.spec.replicas;
+            println!("The pods are configured to run in {} replicas", replicas);
+
+            let mut patches: HashMap<String, String> = HashMap::new();
+
+            if item.spec.max_unavailable.is_some() {
+                match item.spec.max_unavailable.unwrap() {
+                    poddisruptionbudget::IntOrString::Int(i) => {
+                        if i <= replicas {
+                            patches.insert(
+                                String::from("pdb-plus/max-unavailable-count"),
+                                String::from("insufficient-replicas"),
+                            );
+                        }
+                    }
+                    poddisruptionbudget::IntOrString::String(s) => {
+                        // Convert % to plain number
+                        let i: u32 = s.trim_matches('%').parse().unwrap();
+                        if i * replicas / 100 < 1 {
+                            patches.insert(
+                                String::from("pdb-plus/max-unavailable-percent"),
+                                String::from("insufficient-replicas"),
+                            );
+                        }
+                    }
+                }
+            }
+
+            if item.spec.min_available.is_some() {
+                match item.spec.min_available.unwrap() {
+                    poddisruptionbudget::IntOrString::Int(i) => {
+                        if i >= replicas {
+                            patches.insert(
+                                String::from("pdb-plus/min-available-count"),
+                                String::from("insufficient-replicas"),
+                            );
+                        }
+                    }
+                    poddisruptionbudget::IntOrString::String(s) => {
+                        let i: u32 = s.trim_matches('%').parse().unwrap();
+                        if i * replicas / 100 < 1 {
+                            patches.insert(
+                                String::from("pdb-plus/min-available-percent"),
+                                String::from("insufficient-replicas"),
+                            );
+                        }
+                    }
+                }
+            }
+
+            if !is_ready {
+                patches.insert(
+                    String::from("pdb-plus/not-in-service"),
+                    String::from("no-pods-in-service"),
+                );
+            }
+
+            println!("Here are my patches: {:?}", patches);
+            println!("Pod conditions {:?}", pod_item.status.conditions);
         }
     }
 }
