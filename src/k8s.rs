@@ -2,12 +2,25 @@ pub mod corev1;
 pub mod metav1;
 pub mod policyv1;
 
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::time::Duration;
 use std::{env, fs};
 
 pub struct Base {
     client: reqwest::Client,
     headers: reqwest::header::HeaderMap,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct JSONPatch {
+    pub op: String,
+    pub path: String,
+    pub value: Option<Value>,
+}
+
+pub enum PatchType {
+    JSONPatchType,
 }
 
 impl Base {
@@ -109,6 +122,66 @@ impl Base {
         println!("GET {}", url);
         let response: Result<reqwest::Response, reqwest::Error> =
             self.client.get(url).headers(headers).send().await;
+        let body: Result<String, String> = match response {
+            Ok(r) => {
+                let text: Result<String, reqwest::Error> = r.text().await;
+                match text {
+                    Ok(s) => Ok(s),
+                    Err(e) => Err(format!("{}", e.to_string())),
+                }
+            }
+            Err(e) => Err(format!("{}", e.to_string())),
+        };
+
+        match body {
+            Ok(b) => Ok(b.to_string()),
+            Err(e) => Err(Some(e)),
+        }
+    }
+
+    /// make a patch request to k8s api. Err returns a String|None. Only accepts https to make request.
+    #[tokio::main]
+    pub async fn patch(
+        &self,
+        api_version: String,
+        kind: String,
+        namespace: Option<String>,
+        resource: Option<String>,
+        query: Option<String>,
+        body: Vec<JSONPatch>,
+        patch_type: PatchType,
+    ) -> Result<String, Option<String>> {
+        let mut headers = self.headers.clone();
+        match patch_type {
+            PatchType::JSONPatchType => {
+                let patch_type =
+                    reqwest::header::HeaderValue::from_str("application/json-patch+json");
+                headers.append("Content-Type", patch_type.unwrap());
+            }
+        }
+        let default_host = "kubernetes.default.svc";
+        let host = env::var("KUBERNETES_SERVICE_HOST").unwrap_or(String::from(default_host));
+        let namespace = namespace.unwrap_or_default();
+        let resource = resource.unwrap_or_default();
+        let query = query.unwrap_or_default();
+        let apis = if api_version.contains("/") {
+            String::from("apis")
+        } else {
+            String::from("api")
+        };
+        let url = format!(
+            "https://{}/{}/{}/namespaces/{}/{}/{}?{}",
+            host, apis, api_version, namespace, kind, resource, query
+        );
+        println!("PATCH {}", url);
+
+        let response: Result<reqwest::Response, reqwest::Error> = self
+            .client
+            .patch(url)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await;
         let body: Result<String, String> = match response {
             Ok(r) => {
                 let text: Result<String, reqwest::Error> = r.text().await;

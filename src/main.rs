@@ -32,21 +32,26 @@ fn main() {
     let poddisruptionbudget_list: poddisruptionbudget::List;
     poddisruptionbudget_list = serde_json::from_str(&body).expect("Could not decode json");
 
-    println!("{:?}", poddisruptionbudget_list);
+    // println!("{:?}", poddisruptionbudget_list);
 
     for item in poddisruptionbudget_list.items {
         if item.status.disruptions_allowed == 0 {
-            println!(
-                "{}/{} does not allow disruptions",
-                item.metadata.namespace, item.metadata.name
-            );
+            // println!(
+            //     "{}/{} does not allow disruptions",
+            //     item.metadata.namespace, item.metadata.name
+            // );
 
-            // let label_selector = get_label_selector();
+            let mut patches: HashMap<String, String> = HashMap::new();
+
             let query: Option<String> = match item.spec.selector.match_labels {
                 Some(data) => Some(format!(
                     "labelSelector={}",
                     data.iter()
-                        .map(|(key, value)| format!("{}%3D{}", key, value))
+                        .filter(|(k, _v)| !k.contains("pdb-plus"))
+                        .map(|(key, value)| {
+                            patches.insert(String::from(key), String::from(value));
+                            format!("{}%3D{}", key, value)
+                        })
                         .collect::<Vec<_>>()
                         .join("%2C"),
                 )),
@@ -104,7 +109,7 @@ fn main() {
             let kind = format!("{}s", owner_reference.kind.to_lowercase());
             let resource = owner_reference.name;
 
-            println!("Pods are owned by : {}.{}.{}", api_version, kind, resource);
+            // println!("Pods are owned by : {}.{}.{}", api_version, kind, resource);
 
             let body = client
                 .get(
@@ -120,9 +125,7 @@ fn main() {
             replica_kind = serde_json::from_str(&body).expect("Failed to parse replica kind");
 
             let replicas = replica_kind.spec.replicas;
-            println!("The pods are configured to run in {} replicas", replicas);
-
-            let mut patches: HashMap<String, String> = HashMap::new();
+            // println!("The pods are configured to run in {} replicas", replicas);
 
             if item.spec.max_unavailable.is_some() {
                 match item.spec.max_unavailable.unwrap() {
@@ -176,51 +179,33 @@ fn main() {
                 );
             }
 
-            println!("Here are my patches: {:?}", patches);
-            println!("Pod conditions {:?}", pod_item.status.conditions);
+            let mut patch: Vec<k8s::JSONPatch> = Vec::new();
+            patch.push(k8s::JSONPatch {
+                op: String::from("remove"),
+                path: String::from("/spec/selector/matchLabels"),
+                value: None,
+            });
+            patch.push(k8s::JSONPatch {
+                op: String::from("add"),
+                path: String::from("/spec/selector/matchLabels"),
+                value: Some(serde_json::json!(patches)),
+            });
+
+            // println!("Here are my patches: {:?}", patches);
+
+            let body = client.patch(
+                String::from("policy/v1"),
+                String::from("poddisruptionbudgets"),
+                Some(String::from(&item.metadata.namespace)),
+                Some(item.metadata.name),
+                None,
+                patch,
+                k8s::PatchType::JSONPatchType,
+            );
+
+            if body.is_err() {
+                println!("Error patching {:?}", body.unwrap_err());
+            }
         }
     }
 }
-
-/*
-podList, err := k.listPods(namespace, selector)
-if err != nil {
-        log.Fatal(err)
-}
-
-if len(podList.Items) == 0 {
-        // ----------Disable------------
-        // - Disable and mark with condition ready > 0
-        // -----------------------------//
-        continue
-}
-
-// create a new dynamicClient
-dynamicKubeClient := newDynamicKubeClient()
-_ = dynamicKubeClient
-
-// extract gvk from a pod. If not parent data exists, disable PDB
-//gvk := schema.GroupVersionResource{
-//      Group:    "",
-//      Version:  "",
-//      Resource: "",
-// }
-
-// set a resource for the client
-// dynamicClient.client.Resource(gvk)
-
-// Find the resource and check the Replica count
-// Disable if replica count is
-// ----------Disable------------
-// - PDB_Minimum >= Replicas
-// - PDB_MaxUnavailable % * Replicas < 1
-// - PDB_MaxUnavailable N - Replaics <= 0
-// -----------------------------//
-//
-
-// Check if isInService
-// ----------Disable------------
-// - is not in service, disable
-// -----------------------------//
-
-// Is in service. timestamp and alert after some time */
