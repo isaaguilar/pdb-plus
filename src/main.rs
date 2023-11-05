@@ -1,11 +1,10 @@
 mod k8s;
-use std::collections::HashMap;
-
 use k8s::corev1::pod;
+use k8s::metav1;
 use k8s::policyv1::poddisruptionbudget;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-use crate::k8s::metav1;
 #[derive(Serialize, Deserialize, Debug)]
 struct ReplicaKind {
     metadata: metav1::ObjectMeta,
